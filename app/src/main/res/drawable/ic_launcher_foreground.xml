@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- number tile -->
+    <path android:fillColor="#3F7C76"
+        android:pathData="M36,30h28a8,8 0,0 1,8 8v32a8,8 0,0 1,-8 8h-28a8,8 0,0 1,-8 -8v-32a8,8 0,0 1,8 -8z" />
+    <!-- digit 1 -->
+    <path android:fillColor="#FFF8EC"
+        android:pathData="M51,40h6v30h-6v-22.5l-5,3v-6z M44,66h20v5h-20z" />
+    <!-- plus badge -->
+    <path android:fillColor="#F6D365"
+        android:pathData="M71,56m-11,0a11,11 0,1 1,22 0a11,11 0,1 1,-22 0" />
+    <path android:fillColor="#1F2A44"
+        android:pathData="M69.5,49h3v5.5h5.5v3h-5.5v5.5h-3v-5.5h-5.5v-3h5.5z" />
+</vector>

@@ -1,0 +1,214 @@
+name: Android CI & signed release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      minify:
+        description: "Enable R8 + resource shrinking (only after a verified non-minified release)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "17"
+  BUILD_TOOLS: "36.0.0"
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-36 build-tools;${{ env.BUILD_TOOLS }} platform-tools"
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests (arithmetic, generation, progress)
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
+      - name: Release lint
+        run: ./gradlew --no-daemon :app:lintRelease
+
+      - name: Upload test & lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            app/build/reports/
+            app/build/test-results/
+          if-no-files-found: ignore
+
+      - name: Upload Room schemas
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-schemas
+          path: app/schemas/
+          if-no-files-found: warn
+
+  release:
+    needs: test-and-lint
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-36 build-tools;${{ env.BUILD_TOOLS }} platform-tools"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Check signing secrets are present
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for v in KS_B64 KS_PASS KEY_ALIAS KEY_PASS; do
+            if [ -z "${!v}" ]; then echo "::error::Secret for $v is missing"; missing=1; fi
+          done
+          exit $missing
+
+      - name: Decode PKCS12 keystore to a temporary location
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          KS_DIR="$(mktemp -d)"
+          echo "$KS_B64" | base64 --decode > "$KS_DIR/release.p12"
+          chmod 600 "$KS_DIR/release.p12"
+          echo "ANDROID_KEYSTORE_PATH=$KS_DIR/release.p12" >> "$GITHUB_ENV"
+          echo "KS_DIR=$KS_DIR" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK and AAB
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          MINIFY="${{ github.event.inputs.minify || 'false' }}"
+          ./gradlew --no-daemon -Pnumipad.minify="$MINIFY" :app:assembleRelease :app:bundleRelease
+
+      - name: Locate artifacts
+        run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          AAB=$(ls app/build/outputs/bundle/release/*.aab | head -1)
+          test -f "$APK" && test -f "$AAB"
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          echo "AAB=$AAB" >> "$GITHUB_ENV"
+          echo "BT=$ANDROID_HOME/build-tools/${BUILD_TOOLS}" >> "$GITHUB_ENV"
+
+      - name: Verify APK signature (apksigner) and reject debug certificates
+        run: |
+          "$BT/apksigner" verify --verbose --print-certs "$APK" | tee apksigner.txt
+          grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" apksigner.txt
+          if grep -q "CN=Android Debug" apksigner.txt; then
+            echo "::error::APK is signed with the Android debug certificate"; exit 1
+          fi
+
+      - name: Verify AAB signature (jarsigner) and expected signer
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          # Self-signed upload certificates are normal for Play; jarsigner may warn about them.
+          # Integrity is what matters: "jar verified." plus no unsigned entries.
+          jarsigner -verify -strict -verbose -certs "$AAB" > jarsigner.txt 2>&1 || true
+          grep -q "jar verified." jarsigner.txt || { tail -40 jarsigner.txt; echo "::error::AAB signature invalid"; exit 1; }
+          if grep -qE "unsigned entries|has been tampered|does not match" jarsigner.txt; then
+            echo "::error::AAB contains unsigned or modified entries"; exit 1
+          fi
+          if grep -q "CN=Android Debug" jarsigner.txt; then
+            echo "::error::AAB is signed with the Android debug certificate"; exit 1
+          fi
+          # Expected signer = the certificate in our release keystore.
+          EXPECTED=$(keytool -exportcert -rfc -storetype PKCS12 -keystore "$ANDROID_KEYSTORE_PATH" \
+            -storepass:env ANDROID_KEYSTORE_PASSWORD -alias "$ANDROID_KEY_ALIAS" | openssl x509 -noout -fingerprint -sha256 | cut -d= -f2)
+          SIGFILE=$(unzip -Z1 "$AAB" | grep -E '^META-INF/.*\.(RSA|EC|DSA)$' | head -1)
+          ACTUAL=$(unzip -p "$AAB" "$SIGFILE" | openssl pkcs7 -inform DER -print_certs | openssl x509 -noout -fingerprint -sha256 | cut -d= -f2)
+          echo "expected=$EXPECTED actual=$ACTUAL"
+          test -n "$EXPECTED" && [ "$EXPECTED" = "$ACTUAL" ] || { echo "::error::AAB signer does not match release key"; exit 1; }
+          APK_SHA=$(grep -m1 "certificate SHA-256 digest" apksigner.txt | awk '{print $NF}' | tr 'a-f' 'A-F')
+          [ "$(echo "$EXPECTED" | tr -d ':')" = "$APK_SHA" ] || { echo "::error::APK signer does not match release key"; exit 1; }
+
+      - name: Check release permissions
+        run: |
+          "$BT/aapt2" dump permissions "$APK" | tee permissions.txt
+          if grep -E "uses-permission: name='android.permission.(INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE|CAMERA|RECORD_AUDIO|ACCESS_FINE_LOCATION|ACCESS_COARSE_LOCATION|READ_CONTACTS|POST_NOTIFICATIONS)'" permissions.txt; then
+            echo "::error::Prohibited permission found in release APK"; exit 1
+          fi
+          "$BT/aapt2" dump badging "$APK" | grep -E "^(package|sdkVersion|targetSdkVersion)" | tee badging.txt
+          grep -q "targetSdkVersion:'36'" badging.txt
+          grep -q "sdkVersion:'26'" badging.txt
+          grep -q "compileSdkVersion='36'" badging.txt
+
+      - name: Native libraries & 16 KB alignment
+        run: |
+          echo "## Native library inspection" > native-report.md
+          SO_APK=$(unzip -Z1 "$APK" | grep -E '\.so$' || true)
+          SO_AAB=$(unzip -Z1 "$AAB" | grep -E '\.so$' || true)
+          if [ -z "$SO_APK" ] && [ -z "$SO_AAB" ]; then
+            echo "No native .so libraries in the APK or AAB (including transitive dependencies). 16 KB ELF alignment is not applicable." | tee -a native-report.md
+          else
+            echo "Native libraries found:" | tee -a native-report.md
+            echo "$SO_APK $SO_AAB" | tee -a native-report.md
+            "$BT/zipalign" -c -P 16 -v 4 "$APK" | tee -a native-report.md
+            mkdir -p so && cd so && unzip -o -q "../$APK" 'lib/*' && cd ..
+            for f in $(find so -name '*.so'); do
+              ALIGN=$(readelf -lW "$f" | awk '/LOAD/ {print $NF}' | sort -u | tr '\n' ' ')
+              echo "$f LOAD alignments: $ALIGN" | tee -a native-report.md
+              for a in $ALIGN; do
+                if [ $((a)) -lt $((0x4000)) ]; then echo "::error::$f is not 16 KB aligned"; exit 1; fi
+              done
+            done
+          fi
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          cp "$APK" dist/numipad-junior-release.apk
+          cp "$AAB" dist/numipad-junior-release.aab
+          cp apksigner.txt jarsigner.txt permissions.txt badging.txt native-report.md dist/
+          if [ -f app/build/outputs/mapping/release/mapping.txt ]; then cp app/build/outputs/mapping/release/mapping.txt dist/; fi
+
+      - name: Upload verified artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: numipad-junior-release
+          path: dist/
+
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          if [ -n "$KS_DIR" ] && [ -d "$KS_DIR" ]; then
+            shred -u "$KS_DIR"/* 2>/dev/null || rm -f "$KS_DIR"/*
+            rmdir "$KS_DIR" || true
+          fi

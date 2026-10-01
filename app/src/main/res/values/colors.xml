@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="cream">#FFF8EC</color>
+    <color name="navy">#1F2A44</color>
+    <color name="teal">#7FB8B1</color>
+    <color name="teal_dark">#3F7C76</color>
+    <color name="yellow">#F6D365</color>
+    <color name="lavender">#E4DBF6</color>
+</resources>
