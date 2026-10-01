@@ -165,9 +165,9 @@ jobs:
           if grep -E "uses-permission: name='android.permission.(INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE|CAMERA|RECORD_AUDIO|ACCESS_FINE_LOCATION|ACCESS_COARSE_LOCATION|READ_CONTACTS|POST_NOTIFICATIONS)'" permissions.txt; then
             echo "::error::Prohibited permission found in release APK"; exit 1
           fi
-          "$BT/aapt2" dump badging "$APK" | grep -E "^(package|sdkVersion|targetSdkVersion)" | tee badging.txt
+          "$BT/aapt2" dump badging "$APK" | grep -E "^(package|sdkVersion|minSdkVersion|targetSdkVersion)" | tee badging.txt
           grep -q "targetSdkVersion:'36'" badging.txt
-          grep -q "sdkVersion:'26'" badging.txt
+          grep -qE "^(minSdkVersion|sdkVersion):'26'" badging.txt
           grep -q "compileSdkVersion='36'" badging.txt
 
       - name: Native libraries & 16 KB alignment
