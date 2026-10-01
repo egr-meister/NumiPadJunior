@@ -114,13 +114,12 @@ room {
 
 // Fail fast when a release task runs without real credentials.
 gradle.taskGraph.whenReady {
-    val wantsRelease = allTasks.any { t ->
-        t.project == project && (
-            t.name.contains("Release") &&
-                (t.name.startsWith("assemble") || t.name.startsWith("bundle") ||
-                    t.name.startsWith("package") || t.name.startsWith("sign"))
-            )
-    }
+    // Only tasks that actually produce or sign release artifacts (not lint/resource tasks).
+    val signingTasks = setOf(
+        "assembleRelease", "bundleRelease", "packageRelease", "packageReleaseBundle",
+        "signReleaseBundle", "validateSigningRelease", "installRelease",
+    )
+    val wantsRelease = allTasks.any { t -> t.project == project && t.name in signingTasks }
     if (wantsRelease && !hasReleaseSigning) {
         throw GradleException(
             "Release signing credentials are missing. Set ANDROID_KEYSTORE_PATH, " +
