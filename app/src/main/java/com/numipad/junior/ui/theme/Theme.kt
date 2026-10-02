@@ -1,10 +1,12 @@
 package com.numipad.junior.ui.theme
 
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.Color
@@ -56,7 +58,9 @@ private val scheme = lightColorScheme(
 )
 
 // System sans-serif for clarity; sizes are in sp so system font scaling applies.
-private val base = TextStyle(fontFamily = FontFamily.SansSerif, color = NumiColors.Navy)
+// No colour in the style: text must follow LocalContentColor so it stays readable on dark
+// surfaces (navy "=" key, navy buttons) and light ones alike.
+private val base = TextStyle(fontFamily = FontFamily.SansSerif)
 private val typography = Typography(
     displayLarge = base.copy(fontSize = 48.sp, fontWeight = FontWeight.Bold, lineHeight = 56.sp),
     displayMedium = base.copy(fontSize = 40.sp, fontWeight = FontWeight.Bold, lineHeight = 48.sp),
@@ -81,5 +85,8 @@ val LocalReduceMotion = staticCompositionLocalOf { false }
 
 @Composable
 fun NumiPadTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = scheme, typography = typography, shapes = shapes, content = content)
+    MaterialTheme(colorScheme = scheme, typography = typography, shapes = shapes) {
+        // Default text colour outside any Surface (screen backgrounds are drawn manually).
+        CompositionLocalProvider(LocalContentColor provides NumiColors.Navy, content = content)
+    }
 }
